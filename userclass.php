@@ -19,11 +19,10 @@ function randString($length = 10, $chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ
 
 class db_conn {
 	// External
-	
+	public $user = null;
 	
 	// Internal
 	private $user_id = null;
-	private $group_id = null;
 	private $db = null;
 	private $db_type = null;
 	private $db_options = null;
@@ -150,23 +149,34 @@ class db_conn {
 	}
 	
 	// External Functions
-	public function getUser($user_id, $include_options = false) {
-		return $this->get_user_or_group('users', $user_id, $include_options);
+	public function getUser($user_id, $include_options = false, $inherit = true) {
+		return current($this->get_user_or_group('users', $user_id, $include_options, $inherit));
 	}
 	
-	public function getUsers($include_options = false) {
-		return $this->get_user_or_group('users', false, $include_options);
+	public function getUsers($include_options = false, $inherit = true) {
+		return $this->get_user_or_group('users', false, $include_options, $inherit);
 	}
 	
-	public function getGroup($group_id, $include_options = false) {
-		return $this->get_user_or_group('groups', abs($group_id) * -1, $include_options);
+	public function getGroup($group_id, $include_options = false, $inherit = true) {
+		return current($this->get_user_or_group('groups', $group_id, $include_options, $inherit));
 	}
 	
-	public function getGroups($include_options = false) {
-		return $this->get_user_or_group('groups', false, $include_options);
+	public function getGroups($include_options = false, $inherit = true) {
+		return $this->get_user_or_group('groups', false, $include_options, $inherit);
 	}
 	
 	public function createUser($options) {
+		// Username qualify
+		if (isset($options['username']) && $options['username'] && is_numeric($options['username'])) {
+			die('Username can\'t be a number!');
+		}
+		
+		// Create Secure Password Hash
+		if (isset($options['password']) && $options['password']) {
+			$options['pass_hash'] = password_hash($options['password'], PASSWORD_BCRYPT);
+			unset($options['password']);
+		}
+		
 		// Primary Qualify
 		$data = array();
 		foreach(array('username','pass_hash','first','last','groups_id') as $value) {
@@ -186,6 +196,64 @@ class db_conn {
 			}
 		}
 		return $this->query_create('groups', $data);
+	}
+	
+	public function loginUser($username, $password, $twoFactorCode= false) {
+		if (is_numeric($username)) { die('Username can\'t be a number!'); } // Prevent using ID as username
+		$user = current($this->get_user_or_group('users', $username));
+		
+		// Check if user Exists
+		if ($user) {
+			// Verify Password
+			if (password_verify($password, $user['pass_hash'])) {
+				// Verify Multi Factor Auth Code
+				if (1 || $twoFactorCode) {
+					// Set User ID
+					$this->user_id = $user['id'];
+					// Set User Publicly
+					$this->user = $user;
+					// Return Successful Auth
+					return $user;
+				} else {
+					return false;
+				}
+			} else {
+				return false;
+			}
+		} else {
+			return false;
+		}
+	}
+	
+	public function deleteUser($id) {
+		$user = current($this->get_user_or_group('users', $id));
+		
+		if ($user) {
+			// Delete Related Options
+			$this->query_delete('options', array('link_id' => $user['id']));
+			// Delete User
+			$this->query_delete('users', array('id' => $user['id']));
+			return true;
+		} else {
+			return false;
+		}
+	}
+	
+	public function deleteGroup($id) {
+		$group = current($this->get_user_or_group('groups', $id));
+		
+		if ($group) {
+			// Delete Related Options
+			$this->query_delete('options', array('link_id' => $group['id']));
+			// Remove User References
+			$this->query_update('users', array('groups_id' => 'null'), array('groups_id' => $group['id']));
+			$this->query_update('users', array('groups_id' => 'null'), array('groups_id' => abs($group['id'])));
+			// Delete User
+			$this->query_delete('groups', array('id' => abs($group['id'])));
+			return true;
+		} else {
+			return false;
+		}
 	}
 	
 	public function globalOpts($values = null) {
@@ -252,7 +320,6 @@ class db_conn {
 			}
 		} else {
 			if (!isset($link)) { $link = $this->user_id; }
-			if (!isset($link)) { $link = '*'; } // Remove?
 			if (isset($link)) {
 				// Format Input
 				if ($link == '*') {
@@ -284,18 +351,43 @@ class db_conn {
 	}
 	
 	// Internal Functions
-	private function get_user_or_group($type = 'users', $id = false, $include_options = false) {
-		// Return Group List
+	private function get_user_or_group($type = 'users', $id = false, $include_options = false, $inherit = true) {
+		// Check if entry is numeric or string
+		if ($id !== false) {
+			if (is_numeric($id)) {
+				$id = array('id'=>abs($id));
+			} else if (is_string($id)) {
+				$id = array(($type=='groups'?'name':'username')=>$id);
+			} else {
+				die('Malformed input: Only Types STRING, INTEGER, BOOLEAN(false only) accepted');
+			}
+		} else {
+			$id = array();
+		}
+		
+		// Perform Lookup
 		$output = array();
-		foreach($this->query_select($type, ($id !== false ? array('id'=>$id) : array())) as $key => $value) {
-			$value['id'] = ($value['id'] * ($type=='groups'?-1:1));
+		foreach($this->query_select($type, $id) as $key => $value) {
+			$value['id'] = (abs($value['id']) * ($type=='groups'?-1:1));
 			foreach($value as $k => $v) {
 				if (is_string($k)) {
 					$output[$value['id']][$k] = $v;
 				}
 			}
+			// Get Options
 			if ($include_options) {
 				$output[$value['id']]['options'] = current($this->options($value['id']));
+				$inheritFieldName = ($type=='groups'?'inherit_groups_id':'groups_id');
+				// Inherit As Needed
+				if ($inherit && isset($value[$inheritFieldName]) && $value[$inheritFieldName]) {
+					$groupOpts = current($this->get_user_or_group('groups', $value[$inheritFieldName], true))['options'];
+					// Add in missing fields 
+					foreach($groupOpts as $k => $v) {
+						if (!isset($output[$value['id']]['options'][$k])) {
+							$output[$value['id']]['options'][$k] = $v;
+						}
+					}
+				}
 			}
 		}
 		return $output;
@@ -455,6 +547,7 @@ class db_conn {
 				foreach($db_structure['tables'] as $tableName => $tableFields) {
 					// Field/Key Arrays
 					$fields = array();
+					$hasAuto = false;
 					$primaryKey = array();
 					$uniqueKey = array();
 					// Field Processing
@@ -465,7 +558,7 @@ class db_conn {
 						if (isset($fieldAttrs['unsigned']) && $fieldAttrs['unsigned']) { $fieldAttrs['unsigned'] = 'UNSIGNED'; } else { $fieldAttrs['unsigned'] = ''; }
 						if (isset($fieldAttrs['notnull']) && $fieldAttrs['notnull']) { $fieldAttrs['notnull'] = 'NOT NULL'; } else { $fieldAttrs['notnull'] = 'NULL'; }
 						if (isset($fieldAttrs['zerofill']) && $fieldAttrs['zerofill']) { $fieldAttrs['zerofill'] = 'ZEROFILL'; } else { $fieldAttrs['zerofill'] = ''; }
-						if (isset($fieldAttrs['autoinc']) && $fieldAttrs['autoinc']) { $fieldAttrs['autoinc'] = 'AUTO_INCREMENT'; } else { $fieldAttrs['autoinc'] = ''; }
+						if (isset($fieldAttrs['autoinc']) && $fieldAttrs['autoinc']) { $fieldAttrs['autoinc'] = 'AUTO_INCREMENT'; $hasAuto = true; } else { $fieldAttrs['autoinc'] = ''; }
 						if (isset($fieldAttrs['default']) && $fieldAttrs['default']) { $fieldAttrs['default'] = 'DEFAULT \''.addslashes($fieldAttrs['default']).'\''; } else { $fieldAttrs['default'] = ''; }
 						if (isset($fieldAttrs['comment']) && $fieldAttrs['comment']) { $fieldAttrs['comment'] = 'COMMENT \''.addslashes($fieldAttrs['comment']).'\''; } else { $fieldAttrs['comment'] = ''; }
 						// Keys
@@ -495,7 +588,7 @@ class db_conn {
 					}
 					
 					// Query Execution
-					$query = 'CREATE TABLE `'.$tableName.'`('.implode(',', $fields).') COLLATE=\'utf8_general_ci\' ENGINE=InnoDB;';
+					$query = 'CREATE TABLE `'.$tableName.'`('.implode(',', $fields).') COLLATE=\'utf8_general_ci\' ENGINE=InnoDB '.($hasAuto?'AUTO_INCREMENT=1':'').';';
 					if (!$this->db->query($query)) {
 						die('Create Failed: '.$query.'<br>Db Error: '.$this->db->error);
 					}
@@ -589,16 +682,14 @@ class db_conn {
 			case 'sqlite':
 				// Condition data
 				$data = $this->condition_data($data);
-				$where = $this->condition_data($where);
 				// Perform Query
-				return ($this->db->query('UPDATE '.$table.' SET '.implode(',',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($data),$data)).($where?' WHERE '.implode(' AND ',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($where),$where)):'').';')->rowCount()?true:false);
+				return ($this->db->query('UPDATE '.$table.' SET '.implode(',',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($data),$data)).($where?' WHERE '.$this->condition_where($where):'').';')->rowCount()?true:false);
 				break;
 			case 'mysql':
 				// Condition data
 				$data = $this->condition_data($data);
-				$where = $this->condition_data($where);
 				// Perform Query
-				return $this->db->query('UPDATE '.$table.' SET '.implode(',',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($data),$data)).($where?' WHERE '.implode(' AND ',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($where),$where)):'').';');
+				return $this->db->query('UPDATE '.$table.' SET '.implode(',',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($data),$data)).($where?' WHERE '.$this->condition_where($where):'').';');
 				break;
 		}
 	}
@@ -640,15 +731,12 @@ class db_conn {
 	private function query_delete($table, $where) {
 		switch ($this->db_type) {
 			case 'sqlite':
-				// Condition data
-				$where = $this->condition_data($where);
-				return ($this->db->query('DELETE FROM '.$table.($where?' WHERE '.implode(' AND ',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($where),$where)):'').';')->rowCount()?true:false);
+				// Perform Query
+				return ($this->db->query('DELETE FROM '.$table.($where?' WHERE '.$this->condition_where($where):'').';')->rowCount()?true:false);
 				break;
 			case 'mysql':
-				// Condition data
-				$where = $this->condition_data($where);
 				// Perform Query
-				return $this->db->query('DELETE FROM '.$table.($where?' WHERE '.implode(' AND ',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($where),$where)):'').';');
+				return $this->db->query('DELETE FROM '.$table.($where?' WHERE '.$this->condition_where($where):'').';');
 				break;
 		}
 	}
@@ -658,9 +746,8 @@ class db_conn {
 			case 'mysql': // This works for now
 			case 'sqlite':
 				// Condition data
-				$where = $this->condition_data($where);
 				$results = array();
-				foreach($this->db->query('SELECT * FROM '.$table.($where?' WHERE '.implode(' AND ',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($where),$where)):'').';') as $key => $value) {
+				foreach($this->db->query('SELECT * FROM '.$table.($where?' WHERE '.$this->condition_where($where):'').';') as $key => $value) {
 					foreach($value as $k => $v) {
 						if (is_string($k)) {
 							if (preg_match('/^JSON\|(.*)/',$v,$json) === 1) {
@@ -686,10 +773,57 @@ class db_conn {
 		}
 		return $data;
 	}
+	
+	private function condition_where($where, $andOr = false) {
+		$output = array();
+		foreach($where as $k => $v) {
+			if (is_string($k)) {
+				if (is_array($v)) {
+					$compare = '=';
+					if (isset($v[0]) && $v[0]) { $compare = $v[0]; }
+					if (isset($v['sign']) && $v['sign']) { $compare = $v['sign']; }
+					$val = null;
+					if (isset($v[1]) && $v[1]) { $val = $v[1]; }
+					if (isset($v['val']) && $v['val']) { $val = $v['val']; }
+					if (isset($v['value']) && $v['value']) { $val = $v['value']; }
+					
+					$output[] = '`'.$k.'`'.$compare.($val==='null'?$val:"'$val'");
+				} else {
+					$output[] = '`'.$k.'`=\''.$v.'\'';
+				}
+			} else if (is_array($v)) {
+				$output[] = '('.$this->condition_where($v, !$andOr).')';
+			} else {
+				die('Malformed Where Arguments');
+			}
+		}
+		
+		return implode(($andOr?' OR ':' AND '),$output);
+	}
 }
 
 // Create DB Connection
 $test = new db_conn(0,'./test.db');
+
+// Test user full circle
+$user = randString();
+$pass = randString();
+debug_out($user);
+debug_out($pass);
+debug_out('Create User: '.$test->createUser(array(
+	'username' => $user,
+	'password' => $pass,
+)));
+debug_out('Apply User Settings: '.$test->options($test->getUser($user)['id'], array(
+	'set1' => randString(),
+	'set2' => randString(),
+	'set3' => randString(),
+	'set4' => array(randString(), randString() => randString()),
+	randString() => randString(),
+)));
+debug_out($test->loginUser($user,$pass));
+debug_out($test->getUser($user,true));
+debug_out($test->deleteUser($user));
 
 // Test Groups
 debug_out('Create Group: '.$test->createGroup(array(
