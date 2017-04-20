@@ -8,6 +8,17 @@ function debug_out($variable, $die = false) {
 	if ($die) { http_response_code(503); die(); }
 }
 
+// Generate Random string
+function randString($length = 10, $chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
+	$tmp = '';
+	for ($i = 0; $i < $length; $i++) {
+		$tmp .= substr(str_shuffle($chars), 0, 1);
+	}
+    return $tmp;
+}
+
+
+
 class db_conn {
 	// External
 	
@@ -20,7 +31,7 @@ class db_conn {
 	private $db_options = null;
 	
 	// Constants
-	private $db_version = '0.52';
+	private $db_version = '0.53';
 	
 	// Setup
 	function __construct($db_type, $options) {
@@ -105,10 +116,20 @@ class db_conn {
 	}
 	
 	// External Functions
-	public function getUsers() {
-		// Return User List
-		
-		return array();
+	public function getUser($user_id, $include_options = false) {
+		return $this->get_user_or_group('users', $user_id, $include_options);
+	}
+	
+	public function getUsers($include_options = false) {
+		return $this->get_user_or_group('users', false, $include_options);
+	}
+	
+	public function getGroup($group_id, $include_options = false) {
+		return $this->get_user_or_group('groups', abs($group_id) * -1, $include_options);
+	}
+	
+	public function getGroups($include_options = false) {
+		return $this->get_user_or_group('groups', false, $include_options);
 	}
 	
 	public function createUser($options) {
@@ -120,6 +141,17 @@ class db_conn {
 			}
 		}
 		return $this->query_create('users', $data);
+	}
+	
+	public function createGroup($options) {
+		// Primary Qualify
+		$data = array();
+		foreach(array('inherit_groups_id','name') as $value) {
+			if (isset($options[$value])) {
+				$data[$value] = $options[$value];
+			}
+		}
+		return $this->query_create('groups', $data);
 	}
 	
 	public function globalOpts($values = null) {
@@ -150,6 +182,7 @@ class db_conn {
 	public function options($link = null, $values = null) {
 		// If link not set then currently active user id, negative indicates group id
 		// If values not set then return values, if set with key=>val pair then set values
+		
 		if (isset($values) && is_array($values)) {
 			if (isset($link)) {
 				$is_valid_link = false;
@@ -167,7 +200,7 @@ class db_conn {
 						}
 					}
 				}
-
+				
 				if ($is_valid_link) {
 					foreach($values as $k => $v) {
 						$this->query_create_or_update('options', array(
@@ -217,7 +250,24 @@ class db_conn {
 	}
 	
 	// Internal Functions
-	private function create_db() { // Eventually inject table data as array (maybe)
+	private function get_user_or_group($type = 'users', $id = false, $include_options = false) {
+		// Return Group List
+		$output = array();
+		foreach($this->query_select($type, ($id !== false ? array('id'=>$id) : null)) as $key => $value) {
+			$value['id'] = ($value['id'] * ($type=='groups'?-1:1));
+			foreach($value as $k => $v) {
+				if (is_string($k)) {
+					$output[$value['id']][$k] = $v;
+				}
+			}
+			if ($include_options) {
+				$output[$value['id']]['options'] = current($this->options($value['id']));
+			}
+		}
+		return $output;
+	}
+	
+	private function create_db($recreate = false) { // Eventually inject table data as array (maybe)
 		switch ($this->db_type) {
 			case 'sqlite':
 				if (!isset($this->db)) {
@@ -239,7 +289,7 @@ class db_conn {
 				);');
 				$users = $this->db->query('CREATE TABLE `users` (
 					`id`	INTEGER PRIMARY KEY AUTOINCREMENT,
-					`groups_id`	TEXT NOT NULL,
+					`groups_id`	TEXT,
 					`username`	TEXT NOT NULL UNIQUE,
 					`pass_hash`	TEXT NOT NULL,
 					`active`	INTEGER NOT NULL DEFAULT 1,
@@ -253,6 +303,10 @@ class db_conn {
 					`name`	TEXT NOT NULL UNIQUE
 				);');
 				$db_version = $this->globalOpts(array('db_version' => $this->db_version));
+				
+				if ($recreate) {
+					
+				}
 				return $global && $options && $users && $groups && $db_version;
 				break;
 			
@@ -406,11 +460,49 @@ class db_conn {
 }
 $test = new db_conn(0,'./test.db');
 
-debug_out($test->options(1, array(
-	'set1' => '4',
-	'set2' => '3',
-	'set3' => '2',
-	'set4' => '1',
-)));
 
-debug_out($test->options('*'));
+// Test Groups
+debug_out('Create Group: '.$test->createGroup(array(
+	'name' => randString(),
+)));
+$groups = $test->getGroups();
+debug_out($groups);
+
+// Test Options Group
+debug_out('Apply Group Settings: '.$test->options(end($groups)['id'], array(
+	'group1' => randString(),
+	'group2' => randString(),
+	'group3' => randString(),
+	'group4' => randString(),
+	randString() => randString(),
+)));
+debug_out($test->options(end($groups)['id']));
+
+// Test Users
+debug_out('Create User: '.$test->createUser(array(
+	'username' => randString(),
+	'pass_hash' => randString(),
+	'groups_id' => end($groups)['id'],
+)));
+$users = $test->getUsers();
+debug_out($users);
+
+// Test Options User
+debug_out('Apply User Settings: '.$test->options(end($users)['id'], array(
+	'set1' => randString(),
+	'set2' => randString(),
+	'set3' => randString(),
+	'set4' => randString(),
+	randString() => randString(),
+)));
+debug_out($test->options(end($users)['id']));
+
+// Group with options
+debug_out($test->getGroup(-1,true));
+debug_out($test->getGroups(true));
+
+// Users with options
+debug_out($test->getUser(1,true));
+debug_out($test->getUsers(true));
+
+
