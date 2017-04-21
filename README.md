@@ -15,6 +15,32 @@ $test = new db_conn(1,array(
 	'database' => 'db_name',
 ));
 ```
+  Import database (Type changing is supported though you might lose function based on the source/destination)
+```
+// Import a SQLite db
+$test->importDatabase(0,'./test2.db');
+
+// Import a MySQL db
+$test->importDatabase(1,array(
+	'host' => '127.0.0.1',
+	'user' => 'root',
+	'pass' => 'password',
+	'database' => 'db_name',
+));
+```
+  Read Private Settings
+```
+$test->getConst('db_type');
+```
+  Getting and Setting DB Cache (For Importing)
+```
+// Get full DB contents
+$cache = $test->cache_db();
+
+// Set full DB contents
+$test->inject_db_cache($cache);
+$test->inject_db_cache($cache, true); // True overwrites existing entries if keys match
+```
   Read Global Settings
 ```
   $variable = $test->globalOpts();
@@ -29,6 +55,13 @@ $test = new db_conn(1,array(
     'option2' => 'value2',
     'option3' => 'value3',
   ));
+```
+  Remove Global Settings
+```
+$test->removeGlobalOpts(array(
+  'option',
+  'option2',
+));
 ```
   Update Existing Global Options
 ```
@@ -98,7 +131,24 @@ $options = $test->options('*');
 $options = $test->options(1); // User IDs are positive
 $options = $test->options(-1); // Group IDs are negative
 ```
-Example Create User, Add Some Options, Log User In, Show User Details with Options and Delete User
+  Set options for user or group
+```
+// ID for users is positive, id for groups is negantive. Must use ID not name/username
+$test->options(1, array(
+	'set1' => 'value1',
+	'set2' => 'value2',
+	'set3' => 'value3',
+	'set4' => array('Array Example', 'Some Key' => 'Assoc Value'),
+));
+```
+  Remove User or Group options
+```
+$test->removeOptions(1, array(
+	'set1',
+	'set2',
+));
+```
+  Example Create User, Add Some Options, Log User In, Show User Details with Options and Delete User
 ```
 $test = new db_conn(0,'./test.db');
 
