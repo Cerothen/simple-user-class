@@ -64,6 +64,11 @@ $test->deleteUser('Cerothen');
   Login User
 ```
 $test->loginUser($user,$pass); // Username must be string and not the user's ID
+$test->loginUser($user,$pass, true); // Add true to set a 1 week cookie for persistant logins
+```
+  Logout User
+```
+$test->logoutUser(); // Logout a user that is logged into the class
 ```
   Get Group List
 ```
