@@ -135,8 +135,7 @@ class db_conn {
 	}
 	
 	// Takedown
-	function __destruct() { // Causes fatal error in query select routine // Early return till resolved
-		return;
+	function __destruct() {
 		// Remove Expired Sessions From Users
 		$users = $this->getUsers();
 		foreach($users as $key => $value) {
@@ -599,6 +598,29 @@ class db_conn {
 		);
 	}
 	
+	public function rebuildDatabase() {
+		return $this->create_db(true);
+	}
+	
+	public function createTable($createStatement, $syntax = null) {
+		if (is_null($syntax)) { $syntax = $this->db_type; }
+		// If String then process content
+		if (is_string($createStatement)) {
+			preg_match('/CREATE TABLE `(\w+)`/i', $createStatement, $match);
+			$structure = array($match[1]=>$this->process_create_table_to_db_structure($createStatement, $syntax));
+		} else if (is_array($createStatement)) {
+			$structure = $createStatement;
+		} else {
+			return false;
+		}
+		
+		return $this->create_db_table($structure);
+	}
+	
+	public function dropTable($tableName) {
+		return $this->destroy_db(array($tableName));
+	}
+	
 	// Internal Functions
 	private function get_user_or_group($type = 'users', $id = false, $include_options = false, $inherit = true) {
 		// Check if entry is numeric or string
@@ -694,10 +716,11 @@ class db_conn {
 		}
 	}
 	
-	private function process_create_table_to_db_structure($createQuery) {
+	private function process_create_table_to_db_structure($createQuery, $syntax = null) {
+		if (is_null($syntax)) { $syntax = $this->db_type; }
 		$output = array();
 		// Process create query details
-		switch ($this->db_type) {
+		switch ($syntax) {
 			case 'sqlite':
 			case 'mysql':
 				// Process Fields
@@ -736,7 +759,7 @@ class db_conn {
 		return $output;
 	}
 	
-	private function create_db($recreate = false) {
+	public function create_db($recreate = false) {
 		// Create Database
 		switch ($this->db_type) {
 			case 'sqlite':
@@ -771,7 +794,7 @@ class db_conn {
 		return true;
 	}
 	
-	private function create_db_table($createTables) {
+	public function create_db_table($createTables) {
 		switch ($this->db_type) {
 			case 'sqlite':
 				// Type mappings
@@ -1013,13 +1036,14 @@ class db_conn {
 		}
 	}
 	
-	private function query_create($table, $data) {
+	public function query_create($table, $data) {
 		switch ($this->db_type) {
 			case 'sqlite':
 				// Condition data
 				$data = $this->condition_data($data);
 				// Process Query
-				return ($this->db->query('INSERT OR IGNORE INTO '.$table.'(`'.implode('`,`',array_keys($data)).'`) VALUES ('.implode(',',$data).');')->rowCount()?true:false);
+				$result = $this->db->query('INSERT OR IGNORE INTO `'.$table.'` (`'.implode('`,`',array_keys($data)).'`) VALUES ('.implode(',',$data).');');
+				return ($result && $result->rowCount()?true:false);
 				break;
 			case 'mysql':
 				// Condition data
@@ -1030,13 +1054,14 @@ class db_conn {
 		}
 	}
 	
-	private function query_update($table, $data, $where) {
+	public function query_update($table, $data, $where) {
 		switch ($this->db_type) {
 			case 'sqlite':
 				// Condition data
 				$data = $this->condition_data($data);
 				// Perform Query
-				return ($this->db->query('UPDATE '.$table.' SET '.implode(',',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($data),$data)).($where?' WHERE '.$this->condition_where($where):'').';')->rowCount()?true:false);
+				$result = $this->db->query('UPDATE `'.$table.'` SET '.implode(',',array_map(function($k,$v) { return "`$k` = $v"; },array_keys($data),$data)).($where?' WHERE '.$this->condition_where($where):'').';');
+				return ($result && $result->rowCount()?true:false);
 				break;
 			case 'mysql':
 				// Condition data
@@ -1047,7 +1072,7 @@ class db_conn {
 		}
 	}
 	
-	private function query_create_or_update($table, $data) {
+	public function query_create_or_update($table, $data) {
 		switch ($this->db_type) {
 			default: // Other functions will handle the specifics for now
 			case 'sqlite':
@@ -1081,11 +1106,12 @@ class db_conn {
 		}
 	}
 	
-	private function query_delete($table, $where) {
+	public function query_delete($table, $where) {
 		switch ($this->db_type) {
 			case 'sqlite':
 				// Perform Query
-				return ($this->db->query('DELETE FROM '.$table.($where?' WHERE '.$this->condition_where($where):'').';')->rowCount()?true:false);
+				$result = $this->db->query('DELETE FROM '.$table.($where?' WHERE '.$this->condition_where($where):'').';');
+				return ($result && $result->rowCount()?true:false);
 				break;
 			case 'mysql':
 				// Perform Query
@@ -1094,13 +1120,13 @@ class db_conn {
 		}
 	}
 	
-	private function query_select($table, $where = array()) {
+	public function query_select($table, $where = array()) {
 		switch ($this->db_type) {
 			case 'mysql': // This works for now
 			case 'sqlite':
 				// Condition data
 				$results = array();
-				foreach($this->db->query('SELECT * FROM '.$table.($where?' WHERE '.$this->condition_where($where):'').';') as $key => $value) { // Look at why this was causing an error on deconstruct
+				foreach($this->db->query('SELECT * FROM `'.$table.'` '.($where?' WHERE '.$this->condition_where($where):'').';') as $key => $value) {
 					foreach($value as $k => $v) {
 						if (is_string($k)) {
 							if (preg_match('/^JSON\|(.*)/',$v,$json) === 1) {
