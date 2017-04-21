@@ -245,7 +245,7 @@ class db_conn {
 		}
 	}
 	
-	public function logoutUser($id) {
+	public function logoutUser() {
 		if (!is_null($this->user)) {
 			// Destroy Session
 			unset($_SESSION[$this->persist_name]);
