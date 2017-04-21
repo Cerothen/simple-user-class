@@ -69,6 +69,7 @@ $test->loginUser($user,$pass, true); // Add true to set a 1 week cookie for pers
   Logout User
 ```
 $test->logoutUser(); // Logout a user that is logged into the class
+$test->logoutUser(true); // Add true to destroy every cookie login
 ```
   Get Group List
 ```
