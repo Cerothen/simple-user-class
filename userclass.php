@@ -248,6 +248,9 @@ class db_conn {
 			// Remove User References
 			$this->query_update('users', array('groups_id' => 'null'), array('groups_id' => $group['id']));
 			$this->query_update('users', array('groups_id' => 'null'), array('groups_id' => abs($group['id'])));
+			// Remove Group References
+			$this->query_update('groups', array('inherit_groups_id' => 'null'), array('inherit_groups_id' => $group['id']));
+			$this->query_update('groups', array('inherit_groups_id' => 'null'), array('inherit_groups_id' => abs($group['id'])));
 			// Delete User
 			$this->query_delete('groups', array('id' => abs($group['id'])));
 			return true;
@@ -287,23 +290,10 @@ class db_conn {
 		
 		if (isset($values) && is_array($values)) {
 			if (isset($link)) {
-				$is_valid_link = false;
-				foreach($this->query_select('users') as $key=>$value) {
-					if ($link == $value['id']) {
-						$is_valid_link = true;
-						break;
-					}
-				}
-				if (!$is_valid_link) {
-					foreach($this->query_select('groups') as $key=>$value) {
-						if ($link == ($value['id'] * -1)) {
-							$is_valid_link = true;
-							break;
-						}
-					}
-				}
+				$user_links = count($this->query_select('users', array('id' => $link)));
+				$group_links = count($this->query_select('groups', array('id' => abs($link))));
 				
-				if ($is_valid_link) {
+				if ($user_links || $group_links) {
 					foreach($values as $k => $v) {
 						$this->query_create_or_update('options', array(
 							'link_id' => $link,
@@ -316,7 +306,8 @@ class db_conn {
 					return false;
 				}
 			} else {
-				
+				// Cant update if link not specified
+				return false;
 			}
 		} else {
 			if (!isset($link)) { $link = $this->user_id; }
@@ -381,10 +372,12 @@ class db_conn {
 				// Inherit As Needed
 				if ($inherit && isset($value[$inheritFieldName]) && $value[$inheritFieldName]) {
 					$groupOpts = current($this->get_user_or_group('groups', $value[$inheritFieldName], true))['options'];
-					// Add in missing fields 
-					foreach($groupOpts as $k => $v) {
-						if (!isset($output[$value['id']]['options'][$k])) {
-							$output[$value['id']]['options'][$k] = $v;
+					// Add in missing fields if there are any
+					if (is_array($groupOpts)) {
+						foreach($groupOpts as $k => $v) {
+							if (!isset($output[$value['id']]['options'][$k])) {
+								$output[$value['id']]['options'][$k] = $v;
+							}
 						}
 					}
 				}
