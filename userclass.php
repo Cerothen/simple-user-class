@@ -245,13 +245,33 @@ class db_conn {
 		}
 	}
 	
-	public function logoutUser() {
+	public function logoutUser($allSessions = false) {
 		if (!is_null($this->user)) {
 			// Destroy Session
 			unset($_SESSION[$this->persist_name]);
 			// Destroy Cookie
-			unset($_COOKIE[$this->persist_name]);
-			setcookie($this->persist_name, null, -1, '/', $_SERVER['HTTP_HOST']);
+			if (isset($_COOKIE[$this->persist_name])) {
+				$token = json_decode($_COOKIE[$this->persist_name],true)['token'];
+				unset($_COOKIE[$this->persist_name]);
+				setcookie($this->persist_name, null, -1, '/', $_SERVER['HTTP_HOST']);
+			}
+
+			// Amend Sessions
+			if ($allSessions) {
+				$sessions = array();
+			} else if (isset($token)) {
+				$sessions = current($this->get_user_or_group('users', $this->user_id))['sessions'];
+				unset($sessions[$token]);
+			}
+			
+			// Commit new Sessions
+			if (isset($sessions)) {
+				$this->updateUser($this->user_id, array('sessions'=>$sessions));
+			}
+			
+			// Remove class login indicators
+			$this->user = null;
+			$this->user_id = null;
 			// Complete
 			return true;
 		} else {
