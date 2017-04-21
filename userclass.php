@@ -1,22 +1,8 @@
-<?php 
-// Debugging output functions
-function debug_out($variable, $die = false) {
-	$trace = debug_backtrace()[0];
-	echo '<pre style="background-color: #f2f2f2; border: 2px solid black; border-radius: 5px; padding: 5px; margin: 5px;">'.$trace['file'].':'.$trace['line']."\n\n".print_r($variable, true).'</pre>';
-	if ($die) { http_response_code(503); die(); }
-}
-
-// Generate Random string
-function randString($length = 10, $chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
-	$tmp = '';
-	for ($i = 0; $i < $length; $i++) {
-		$tmp .= substr(str_shuffle($chars), 0, 1);
-	}
-    return $tmp;
-}
-
-
-
+<?php
+/*
+	Created by Jarrett Urech
+	GitHub User: Cerothen
+*/
 class db_conn {
 	// External
 	public $user = null;
@@ -866,7 +852,6 @@ class db_conn {
 					$query = 'CREATE TABLE `'.$tableName.'`('.implode(',', $fields).');';
 					
 					if (!$this->db->query($query)) {
-						debug_out($this->db->errorInfo());
 						die('Create Failed: '.$query.'<br>Db Error: '.implode(' : ',$this->db->errorInfo()));
 					}
 				}
