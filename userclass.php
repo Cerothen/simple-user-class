@@ -29,7 +29,7 @@ class db_conn {
 	private $persist_name = 'simpleuserclass';
 	
 	// Setup
-	function __construct($db_type, $options) {
+	function __construct($db_type, $options, $session_init = true) {
 		// Start Session if not already started
 		@session_start();
 		
@@ -115,7 +115,7 @@ class db_conn {
 								$this->upgrade_db();
 							} else {
 								// Create DB
-								$this->create_db(true);
+								$this->create_db();
 							}
 							
 							// Complete DB Setup
@@ -143,15 +143,37 @@ class db_conn {
 		}
 		
 		// Setup Session
-		$this->session_init();
+		if ($session_init) {
+			$this->session_init();
+		}
 	}
 	
 	// Takedown
-	function __destruct() {
-		
+	function __destruct() { // Causes fatal error in query select routine // Early return till resolved
+		return;
+		// Remove Expired Sessions From Users
+		$users = $this->getUsers();
+		foreach($users as $key => $value) {
+			if (isset($value['sessions']) && is_array($value['sessions'])) {
+				foreach($value['sessions'] as $k => $v) {
+					if ($v <= time()) {
+						unset($value['sessions'][$k]);
+					}
+				}
+				$this->updateUser($value['id'], array('sessions'=>$value['sessions']));
+			}
+		}
 	}
 	
 	// External Functions
+	public function getConst($variable) {
+		if (isset($this->$variable)) {
+			return $this->$variable;
+		} else {
+			return null;
+		}
+	}
+	
 	public function getUser($user_id, $include_options = false, $inherit = true) {
 		return current($this->get_user_or_group('users', $user_id, $include_options, $inherit));
 	}
@@ -346,6 +368,17 @@ class db_conn {
 		return false;
 	}
 	
+	public function removeGlobalOpts($names) {
+		if (isset($names)) {
+			if (!is_array($names)) { $names = array($names); }
+			foreach($names as $k => $v) {
+				$this->query_delete('global', array(
+					'name' => $v,
+				));
+			}
+		}
+	}
+	
 	public function options($link = null, $values = null) {
 		// If link not set then currently active user id, negative indicates group id
 		// If values not set then return values, if set with key=>val pair then set values
@@ -403,6 +436,183 @@ class db_conn {
 		return array();
 	}
 	
+	public function removeOptions($link, $names) {
+		if (isset($names)) {
+			if (!is_array($names)) { $names = array($names); }
+			if (isset($link)) {
+				$user_links = count($this->query_select('users', array('id' => $link)));
+				$group_links = count($this->query_select('groups', array('id' => abs($link))));
+				
+				if ($user_links || $group_links) {
+					foreach($names as $k => $v) {
+						$this->query_delete('options', array(
+							'link_id' => $link,
+							'name' => $v,
+						));
+					}
+					return true;
+				} else {
+					return false;
+				}
+			} else {
+				// Cant update if link not specified
+				return false;
+			}
+		} else {
+			// No names keys set
+			return false;
+		}
+	}
+	
+	public function importDatabase($type, $options) {
+		// Get external object
+		$className = get_class($this);
+		$external = new $className($type, $options, false); // False skips session loading
+		
+		// Build Our DB
+		$this->create_db(true);
+		
+		// Get their tables
+		$tableDetails = $external->get_database_tables(true);
+		
+		// Add extra tables to structure
+		$db_structure = array();
+		$existing = $this->db_structure();
+		foreach($tableDetails as $k => $v) {
+			if (!isset($existing['tables'][$v['name']])) {
+				$db_structure['tables'][$v['name']] = $v['structure'];
+			}
+		}
+		
+		// Create Database
+		$this->create_db_table($db_structure['tables']);
+		
+		// Insert Data 
+		$this->inject_db_cache($external->cache_db());
+		
+		// Apply migration log to globals
+		$globals = $this->globalOpts();
+		if (!isset($globals['db_migration'])) { $globals['db_migration'] = array(); }
+		$globals['db_migration'][] = array(
+			'from_ver' => $external->db_structure()['version'],
+			'from_type' => $external->getConst('db_type'),
+			'to_ver' => $this->db_structure()['version'],
+			'to_type' => $this->db_type,
+			'timestamp' => time(),
+		);
+		$this->globalOpts(array(
+			'db_migration' => $globals['db_migration'],
+		));
+		
+		// Close external object
+		$external = null;
+	}
+	
+	public function get_database_tables($getInfo = false) {
+		$output = array();
+		switch ($this->db_type) {
+			case 'sqlite':
+				foreach ($this->db->query('SELECT name, sql FROM sqlite_master WHERE type=\'table\';') as $k => $v) {
+					if ($v['name'] !== 'sqlite_sequence') {
+						$table = array();
+						$table['name'] = $v['name'];
+						if ($getInfo) {
+							// Get Native Create Code
+							$table['create'] = $v['sql'];
+							// Create Structure Array
+							$table['structure'] = $this->process_create_table_to_db_structure($table['create']);
+						}
+						$output[$table['name']] = $table;
+					}
+				}
+				break;
+			case 'mysql':
+				$result = $this->db->query('SHOW TABLES;');
+				while($row = $result->fetch_assoc()) {
+					$table = array();
+					$table['name'] = current($row);
+					if ($getInfo) {
+						// Get Native Create Code
+						$table['create'] = $this->db->query('SHOW CREATE TABLE '.$table['name'].';')->fetch_assoc()['Create Table'];
+						// Create Structure Array
+						$table['structure'] = $this->process_create_table_to_db_structure($table['create']);
+					}
+					$output[$table['name']] = $table;
+				}
+				break;
+		}
+		
+		return $output;
+	}
+	
+	public function cache_db($onlyTables = null) {
+		$output = array();
+		foreach(array_keys($this->get_database_tables()) as $table) {
+			if (!is_array($onlyTables) || in_array($table, $onlyTables)) {
+				foreach($this->query_select($table) as $key => $row) {
+					foreach($row as $k => $v) {
+						if (is_string($k)) {
+							$output[$table][$key][$k] = $v;
+						}
+					}
+				}
+			}
+		}
+		return $output;
+	}
+	
+	public function inject_db_cache($cache) {
+		$success = true;
+		foreach($cache as $table => $tableData) {
+			if ($tableData) {
+				foreach($tableData as $key => $value) {
+					if (!$this->query_create($table, $value)) {
+						if ($table == 'global' && $value['name'] == 'db_version') { continue; } // Do not bother if issue was db_version
+						$success = false;
+						throw new Exception('Could not insert into '.$table.': '.json_encode($value));
+					}
+				}
+			}
+		}
+		return $success;
+	}
+	
+	public function db_structure() {
+		// Field Template
+		// 'example' => array('type' => 'TEXT', 'length' => '50', 'unsigned' => false, 'notnull' => false, 'zerofill' => false, 'primary' => false, 'autoinc' => false, 'unique'=> false, 'default' => '', 'comment' => ''),
+		// type and length are required
+		return array(
+			'version' => '0.73',
+			'tables' => array(
+				'global' => array(
+					'name' => array('type' => 'VARCHAR', 'length' => 100, 'primary' => true,), 
+					'value' => array('type' => 'TEXT', 'length' => 100,),
+				),
+				'options' => array(
+					'link_id' => array('type' => 'INT', 'length' => 11, 'primary' => true,),
+					'name' => array('type' => 'VARCHAR', 'length' => 100, 'primary' => true,),
+					'value' => array('type' => 'TEXT', 'length' => 100,),
+				),
+				'users' => array(
+					'id' => array('type' => 'INT', 'length' => 11, 'primary' => true, 'autoinc' => true,),
+					'groups_id' => array('type' => 'INT', 'length' => 100,),
+					'username' => array('type' => 'VARCHAR', 'length' => 100,),
+					'pass_hash' => array('type' => 'VARCHAR', 'length' => 320,),
+					'sessions' => array('type' => 'TEXT', 'length' => 100,),
+					'active' => array('type' => 'INT', 'length' => 11,),
+					'first' => array('type' => 'VARCHAR', 'length' => 50,),
+					'last' => array('type' => 'VARCHAR', 'length' => 50,),
+					'otp_key' => array('type' => 'TEXT', 'length' => 100,),
+				),
+				'groups' => array(
+					'id' => array('type' => 'INT', 'length' => 11, 'primary' => true, 'autoinc' => true,),
+					'inherit_groups_id' => array('type' => 'INT', 'length' => 11,),
+					'name' => array('type' => 'VARCHAR', 'length' => 100,),
+				),
+			),
+		);
+	}
+	
 	// Internal Functions
 	private function get_user_or_group($type = 'users', $id = false, $include_options = false, $inherit = true) {
 		// Check if entry is numeric or string
@@ -420,6 +630,7 @@ class db_conn {
 		
 		// Perform Lookup
 		$output = array();
+		
 		foreach($this->query_select($type, $id) as $key => $value) {
 			$value['id'] = (abs($value['id']) * ($type=='groups'?-1:1));
 			foreach($value as $k => $v) {
@@ -497,52 +708,86 @@ class db_conn {
 		}
 	}
 	
-	private function db_structure() {
-		// Field Template
-		// 'example' => array('type' => 'TEXT', 'length' => '50', 'unsigned' => false, 'notnull' => false, 'zerofill' => false, 'primary' => false, 'autoinc' => false, 'unique'=> false, 'default' => '', 'comment' => ''),
-		// type and length are required
-		return array(
-			'version' => '0.61',
-			'tables' => array(
-				'global' => array(
-					'name' => array('type' => 'VARCHAR', 'length' => 100, 'primary' => true,), 
-					'value' => array('type' => 'TEXT', 'length' => 100,),
-				),
-				'options' => array(
-					'link_id' => array('type' => 'INT', 'length' => 11, 'primary' => true,),
-					'name' => array('type' => 'VARCHAR', 'length' => 100, 'primary' => true,),
-					'value' => array('type' => 'TEXT', 'length' => 100,),
-				),
-				'users' => array(
-					'id' => array('type' => 'INT', 'length' => 11, 'primary' => true, 'autoinc' => true,),
-					'groups_id' => array('type' => 'INT', 'length' => 100,),
-					'username' => array('type' => 'VARCHAR', 'length' => 100,),
-					'pass_hash' => array('type' => 'VARCHAR', 'length' => 320,),
-					'sessions' => array('type' => 'TEXT', 'length' => 100,),
-					'active' => array('type' => 'INT', 'length' => 11,),
-					'first' => array('type' => 'VARCHAR', 'length' => 50,),
-					'last' => array('type' => 'VARCHAR', 'length' => 50,),
-					'otp_key' => array('type' => 'TEXT', 'length' => 100,),
-				),
-				'groups' => array(
-					'id' => array('type' => 'INT', 'length' => 11, 'primary' => true, 'autoinc' => true,),
-					'inherit_groups_id' => array('type' => 'INT', 'length' => 11,),
-					'name' => array('type' => 'VARCHAR', 'length' => 100,),
-				),
-			),
-		);
+	private function process_create_table_to_db_structure($createQuery) {
+		$output = array();
+		// Process create query details
+		switch ($this->db_type) {
+			case 'sqlite':
+			case 'mysql':
+				// Process Fields
+				preg_match_all('/[`\'"](\w+)[`\'"][ \t]+(\w+)(?:\((\d+)\))?(?=.*[ \t]+(NOT NULL)|)(?=.*[ \t]+DEFAULT[ \t]+\'([^\']*)\'|)(?=.*[ \t]+(AUTO_INCREMENT|AUTOINCREMENT)|)(?=.*[ \t]+(UNSIGNED)|)(?=.*[ \t]+(ZEROFILL)|)(?=.*[ \t]+COMMENT[ \t]+\'([^\']*)\'|)(?=.*[ \t]+(UNIQUE)|)/i', $createQuery, $matches);
+				foreach($matches[1] as $key => $value) {
+					if (isset($matches[2][$key]) && $matches[2][$key]) { $output[$value]['type'] = strtoupper($matches[2][$key]); } 				// TYPE
+					if (isset($matches[3][$key]) && $matches[3][$key]) { $output[$value]['length'] = $matches[3][$key]; } 							// Length
+					if (isset($matches[4][$key]) && $matches[4][$key]) { $output[$value]['notnull'] = true; } 										// Not Null
+					if (isset($matches[5][$key]) && $matches[5][$key]) { $output[$value]['default'] = $matches[5][$key]; } 							// Default
+					if (isset($matches[6][$key]) && $matches[6][$key]) { $output[$value]['autoinc'] = true; $output[$value]['primary'] = true; }	// Auto Increment
+					if (isset($matches[7][$key]) && $matches[7][$key]) { $output[$value]['unsigned'] = true; } 										// Unsigned
+					if (isset($matches[8][$key]) && $matches[8][$key]) { $output[$value]['zerofill'] = true; } 										// Zerofill
+					if (isset($matches[9][$key]) && $matches[9][$key]) { $output[$value]['comment'] = $matches[9][$key]; } 							// Comment
+					if (isset($matches[10][$key]) && $matches[10][$key]) { $output[$value]['unique'] = true; } 										// Unique
+				}
+				// Process Indexes
+				preg_match_all('/(PRIMARY|UNIQUE) (?:INDEX|KEY)(?: `([^`]+)`)? ?\(((?: *`\w+(?:\(\d+\))?` *)(?:, *`\w+(?:\(\d+\))?` *)*)\)/i', $createQuery, $matches);
+				foreach($matches[1] as $key => $value) {
+					$fields = explode(',', str_replace('`','',$matches[3][$key]));
+					switch (strtolower($value)) {
+						case 'primary':
+							foreach($fields as $v) {
+								$output[trim($v)]['primary'] = true;
+							}
+							break;
+						case 'unique':
+							foreach($fields as $v) {
+								$output[trim($v)]['unique'] = (count($fields)!==1?$matches[2][$key]:true);
+							}
+							break;
+						
+					}
+				}
+				break;
+		}
+		return $output;
 	}
 	
 	private function create_db($recreate = false) {
-		$db_structure = $this->db_structure();
-		
+		// Create Database
 		switch ($this->db_type) {
 			case 'sqlite':
-				if ($recreate || !isset($this->db)) {
+				if (is_null($this->db)) {
 					$this->db = new PDO('sqlite:'.$this->db_options);
-					# $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+				} else if ($recreate) {
+					$this->destroy_db();
+					$this->db = new PDO('sqlite:'.$this->db_options);
 				}
-				
+				break;
+			case 'mysql':
+				if (!$this->db->query('SHOW DATABASES LIKE \''.$this->db_options['database'].'\';')->fetch_assoc()) {
+					$this->db->query('CREATE DATABASE '.$this->db_options['database'].';');
+				} else if ($recreate) {
+					$this->destroy_db();
+					$this->db->query('CREATE DATABASE '.$this->db_options['database'].';');
+				}
+				$this->db->query('USE '.$this->db_options['database'].';');
+				break;
+		}
+		
+		// Get Database Structure For Class
+		$db_structure = $this->db_structure();
+		
+		// Create Tables
+		$this->create_db_table($db_structure['tables']);
+		
+		// Assign the DB Version
+		$this->globalOpts(array(
+			'db_version' => $db_structure['version'],
+		));
+		return true;
+	}
+	
+	private function create_db_table($createTables) {
+		switch ($this->db_type) {
+			case 'sqlite':
 				// Type mappings
 				$typeMap = function($key) {
 					$map = array(
@@ -592,7 +837,7 @@ class db_conn {
 				
 				// Table Creation
 				$success = true;
-				foreach($db_structure['tables'] as $tableName => $tableFields) {
+				foreach($createTables as $tableName => $tableFields) {
 					// Field/Key Arrays
 					$fields = array();
 					$primaryKey = array();
@@ -627,11 +872,6 @@ class db_conn {
 				}
 				break;
 			case 'mysql':
-				if ($recreate) {
-					$this->db->query('CREATE DATABASE '.$this->db_options['database'].';');
-					$this->db->query('USE '.$this->db_options['database'].';');
-				}
-				
 				// Type mappings
 				$typeMap = function($key) {
 					$map = array(
@@ -649,7 +889,7 @@ class db_conn {
 				
 				// Table Creation
 				$success = true;
-				foreach($db_structure['tables'] as $tableName => $tableFields) {
+				foreach($createTables as $tableName => $tableFields) {
 					// Field/Key Arrays
 					$fields = array();
 					$hasAuto = false;
@@ -669,7 +909,7 @@ class db_conn {
 						// Keys
 						if (isset($fieldAttrs['primary']) && $fieldAttrs['primary']) { 
 							$fieldAttrs['primary'] = '';
-							$primaryKey[] = '`'.$fieldName.'`'.(in_array($fieldAttrs['type'], array('CHAR','VARCHAR','TINYTEXT','TEXT','MEDIUMTEXT','LONGTEXT'))?$fieldAttrs['length']:'');
+							$primaryKey[] = '`'.$fieldName.'`'.(in_array($fieldAttrs['type'], array('TINYTEXT','TEXT','MEDIUMTEXT','LONGTEXT'))?(isset($fieldAttrs['length'])?$fieldAttrs['length']:100):'');
 						} else { $fieldAttrs['primary'] = ''; }
 						if (isset($fieldAttrs['unique']) && $fieldAttrs['unique']) {
 							$fieldAttrs['unique'] = '';
@@ -700,68 +940,91 @@ class db_conn {
 				}
 				break;
 		}
-		
-		// Assign the DB Version
-		$this->globalOpts(array('db_version' => $db_structure['version']));
-		return true;
 	}
 	
 	private function upgrade_db() {
 		$globals = $this->globalOpts();
+		$currentVersion = $this->db_structure()['version'];
 		
-		if (!isset($globals['db_version']) || $globals['db_version'] < $this->db_structure()['version']) {
+		if (!isset($globals['db_version']) || $globals['db_version'] < $currentVersion) {
+			// Create Tables
+			$createTables = array_keys($this->db_structure()['tables']);
+			
 			// Cache Contents
-			$cache = array();
-			foreach(array_keys($this->db_structure()['tables']) as $table) { // ========== Still not great since it will likely error if new tables are added
-				foreach($this->query_select($table) as $key => $row) {
-					foreach($row as $k => $v) {
-						if (is_string($k)) {
-							$cache[$table][$key][$k] = $v;
-						}
-					}
-				}
-			}
+			$cache = $this->cache_db($createTables);
 			
 			// Remove DB
-			$remove_success = $this->destroy_db();
-			
-			// Create DB
-			$create_success = $this->create_db();
-			
-			// Restore database contents
-			if ($remove_success && $create_success) {
-				foreach($cache as $table => $tableData) {
-					if ($tableData) {
-						foreach($tableData as $key => $value) {
-							$this->query_create($table, $value);
-						}
+			$remove_success = $this->destroy_db($createTables);
+			if ($remove_success) {
+				// Create DB
+				$create_success = $this->create_db();
+				
+				// Restore database contents
+				if ($create_success) {
+					if (!$this->inject_db_cache($cache)) {
+						$db_dump = json_encode($cache);
+						file_put_contents('./db_dump.json',$db_dump);
+						die("Upgrade inject failed! Data preserved in ./db_dump.json \n\n".$db_dump);
 					}
+				} else {
+					$db_dump = json_encode($cache);
+					file_put_contents('./db_dump.json',$db_dump);
+					die("Upgrade create failed! Data preserved in ./db_dump.json \n\n".$db_dump);
 				}
+			} else {
+				$db_dump = json_encode($cache);
+				file_put_contents('./db_dump.json',$db_dump);
+				die("Upgrade remove failed! Data preserved in ./db_dump.json \n\n".$db_dump);
 			}
+			
+			// Cache upgrade history
+			if (!isset($globals['db_upgrades'])) { $globals['db_upgrades'] = array(); }
+			$globals['db_upgrades'][] = array(
+				'from_ver' => $globals['db_version'],
+				'to_ver' => $currentVersion,
+				'timestamp' => time(),
+			);
+			$this->globalOpts(array(
+				'db_upgrades' => $globals['db_upgrades'],
+			));
 		}
 		return true;
 	}
-	
+		
 	private function destroy_db($justTables = false) {
 		switch ($this->db_type) {
 			case 'sqlite':
-				$this->db = null;
-				if (file_exists($this->db_options)) {
-					rename($this->db_options, preg_replace('/\.db$/','.bak.db',$this->db_options));
+				if ($justTables) {
+					if (file_exists($this->db_options)) {
+						copy($this->db_options, preg_replace('/\.db$/','.bak.db',$this->db_options));
+					}
+					foreach($this->get_database_tables() as $k => $v) {
+						if ($justTables === true || in_array($v['name'], $justTables)) {
+							$this->db->query('DROP TABLE IF EXISTS '.$v['name'].';');
+						}
+					}
+				} else {
+					$this->db = null;
+					if (file_exists($this->db_options)) {
+						rename($this->db_options, preg_replace('/\.db$/','.bak.db',$this->db_options));
+					}
 				}
 				return true;
 				break;
 			case 'mysql':
 				if ($justTables) {
-					$result = $this->db->query('SHOW TABLES;');
-					$tables = array();
-					while($row = $result->fetch_assoc()) {
-						$this->db->query('DROP TABLE '.$row['Tables_in_'.$this->db_options['database']].';');
+					foreach($this->get_database_tables() as $k => $v) {
+						if ($justTables === true || in_array($v['name'], $justTables)) {
+							$this->db->query('DROP TABLE IF EXISTS '.$v['name'].';');
+						}
 					}
 				} else {
-					$this->db->query('DROP DATABASE '.db_options['database'].';');
+					$this->db->query('DROP DATABASE IF EXISTS '.$this->db_options['database'].';');
 				}
+				return true;
 				break;
+			default:
+				return false;
 		}
 	}
 	
@@ -852,7 +1115,7 @@ class db_conn {
 			case 'sqlite':
 				// Condition data
 				$results = array();
-				foreach($this->db->query('SELECT * FROM '.$table.($where?' WHERE '.$this->condition_where($where):'').';') as $key => $value) {
+				foreach($this->db->query('SELECT * FROM '.$table.($where?' WHERE '.$this->condition_where($where):'').';') as $key => $value) { // Look at why this was causing an error on deconstruct
 					foreach($value as $k => $v) {
 						if (is_string($k)) {
 							if (preg_match('/^JSON\|(.*)/',$v,$json) === 1) {
@@ -906,72 +1169,3 @@ class db_conn {
 		return implode(($andOr?' OR ':' AND '),$output);
 	}
 }
-
-// Create DB Connection
-$test = new db_conn(0,'./test.db');
-
-// Test user full circle
-$user = randString();
-$pass = randString();
-debug_out($user);
-debug_out($pass);
-debug_out('Create User: '.$test->createUser(array(
-	'username' => $user,
-	'password' => $pass,
-)));
-debug_out('Apply User Settings: '.$test->options($test->getUser($user)['id'], array(
-	'set1' => randString(),
-	'set2' => randString(),
-	'set3' => randString(),
-	'set4' => array(randString(), randString() => randString()),
-	randString() => randString(),
-)));
-debug_out($test->loginUser($user,$pass));
-debug_out($test->getUser($user,true));
-debug_out($test->deleteUser($user));
-
-// Test Groups
-debug_out('Create Group: '.$test->createGroup(array(
-	'name' => randString(),
-)));
-$groups = $test->getGroups();
-debug_out($groups);
-
-// Test Options Group
-debug_out('Apply Group Settings: '.$test->options(end($groups)['id'], array(
-	'group1' => randString(),
-	'group2' => randString(),
-	'group3' => randString(),
-	'group4' => randString(),
-	randString() => randString(),
-)));
-debug_out($test->options(end($groups)['id']));
-
-// Test Users
-debug_out('Create User: '.$test->createUser(array(
-	'username' => randString(),
-	'pass_hash' => randString(),
-	'groups_id' => end($groups)['id'],
-)));
-$users = $test->getUsers();
-debug_out($users);
-
-// Test Options User
-debug_out('Apply User Settings: '.$test->options(end($users)['id'], array(
-	'set1' => randString(),
-	'set2' => randString(),
-	'set3' => randString(),
-	'set4' => array(randString(), randString() => randString()),
-	randString() => randString(),
-)));
-debug_out($test->options(end($users)['id']));
-
-// Group with options
-debug_out($test->getGroup(-1,true));
-debug_out($test->getGroups(true));
-
-// Users with options
-debug_out($test->getUser(1,true));
-debug_out($test->getUsers(true));
-
-
