@@ -26,9 +26,14 @@ class db_conn {
 	private $db = null;
 	private $db_type = null;
 	private $db_options = null;
+	private $persist_name = 'simpleuserclass';
 	
 	// Setup
 	function __construct($db_type, $options) {
+		// Start Session if not already started
+		@session_start();
+		
+		// Setup Database Connection
 		switch ($db_type) {
 			case 0:
 			case 'sqlite':
@@ -56,26 +61,18 @@ class db_conn {
 						
 						// Connect to file
 						$this->db = new PDO('sqlite:'.$options);
-						# $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 						
 						// Confirm file exists
 						if (file_exists($options)) {
-							if (!filesize($options)) {
+							if (filesize($options)) {
+								// Check version & Upgrade if needed
+								$this->upgrade_db();
+							} else {
 								// Create DB if empty file
 								$this->create_db();
-							} else {
-								// Check if upgrade is needed on database
-								$this->upgrade_db();
 							}
-							
-							
-							
-							// Login User Automatically if Enabled
-							
-							
-							
-							// Complete Construct
-							return true;
+							// Complete DB Setup
+							break;
 						} else {
 							throw new Exception('Can\'t access database.');
 						}
@@ -113,13 +110,16 @@ class db_conn {
 						// Lookup database
 						if ($result = @$this->db->query('SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = \''.$options['database'].'\'')) {
 							if ($result->num_rows) {
-								// Check version
+								// Check version & Upgrade if needed
 								$this->db->query('USE '.$options['database'].';');
 								$this->upgrade_db();
 							} else {
 								// Create DB
 								$this->create_db(true);
 							}
+							
+							// Complete DB Setup
+							break;
 						} else {
 							throw new Exception('Lookup failed check permissions');
 						}
@@ -141,6 +141,9 @@ class db_conn {
 			default:
 				throw new Exception('Database Type Doesn\'t Exist.');
 		}
+		
+		// Setup Session
+		$this->session_init();
 	}
 	
 	// Takedown
@@ -179,9 +182,10 @@ class db_conn {
 		
 		// Primary Qualify
 		$data = array();
-		foreach(array('username','pass_hash','first','last','groups_id') as $value) {
+		foreach(array_keys($this->db_structure()['tables']['users']) as $value) {
 			if (isset($options[$value])) {
 				$data[$value] = $options[$value];
+				unset($options[$value]);
 			}
 		}
 		return $this->query_create('users', $data);
@@ -198,7 +202,7 @@ class db_conn {
 		return $this->query_create('groups', $data);
 	}
 	
-	public function loginUser($username, $password, $twoFactorCode= false) {
+	public function loginUser($username, $password, $persist = false, $twoFactorCode= false) {
 		if (is_numeric($username)) { die('Username can\'t be a number!'); } // Prevent using ID as username
 		$user = current($this->get_user_or_group('users', $username));
 		
@@ -212,6 +216,22 @@ class db_conn {
 					$this->user_id = $user['id'];
 					// Set User Publicly
 					$this->user = $user;
+					// Cache login in session
+					$_SESSION[$this->persist_name]['user_id'] = $user['id'];
+					// Set cookie if required
+					if ($persist) {
+						// Prepare cookie parts
+						$token = hash('sha256',$user['id'].time().$user['username'].rand(1, 1000));
+						$expiry = time() + (86400 * 7);
+						// Set Cookie
+						setcookie($this->persist_name, json_encode(array(
+							'user' => $user['id'],
+							'token' => $token,
+						)), $expiry, "/", $_SERVER['HTTP_HOST']);
+						// Set db session
+						$user['sessions'][$token] = $expiry;
+						$this->updateUser($user['id'], array('sessions'=>$user['sessions']));
+					}
 					// Return Successful Auth
 					return $user;
 				} else {
@@ -223,6 +243,28 @@ class db_conn {
 		} else {
 			return false;
 		}
+	}
+	
+	public function logoutUser($id) {
+		if (!is_null($this->user)) {
+			// Destroy Session
+			unset($_SESSION[$this->persist_name]);
+			// Destroy Cookie
+			unset($_COOKIE[$this->persist_name]);
+			setcookie($this->persist_name, null, -1, '/', $_SERVER['HTTP_HOST']);
+			// Complete
+			return true;
+		} else {
+			// No User Logged In
+			return false;
+		}
+	}
+	
+	public function updateUser($id, $values) {
+		return $this->query_update('users', $values, array(array(
+			'id' => $id,
+			'username' => $id,
+		)));
 	}
 	
 	public function deleteUser($id) {
@@ -368,6 +410,7 @@ class db_conn {
 			// Get Options
 			if ($include_options) {
 				$output[$value['id']]['options'] = current($this->options($value['id']));
+				if (!$output[$value['id']]['options']) { $output[$value['id']]['options'] = array(); }
 				$inheritFieldName = ($type=='groups'?'inherit_groups_id':'groups_id');
 				// Inherit As Needed
 				if ($inherit && isset($value[$inheritFieldName]) && $value[$inheritFieldName]) {
@@ -386,12 +429,52 @@ class db_conn {
 		return $output;
 	}
 	
+	private function session_init() {
+		if (isset($_SESSION[$this->persist_name]) && $_SESSION[$this->persist_name]) {
+			// Assign user to class
+			$user = current($this->get_user_or_group('users', $_SESSION[$this->persist_name]['user_id']));
+			if ($user) {
+				$this->user = $user;
+				$this->user_id = $user['id'];
+				return true;
+			} else {
+				// User Doesnt Exists
+				return false;
+			}
+		} else if (isset($_COOKIE[$this->persist_name]) && $_COOKIE[$this->persist_name]) {
+			$cookieDigest = json_decode($_COOKIE[$this->persist_name],true);
+			if (is_array($cookieDigest) && isset($cookieDigest['user']) && isset($cookieDigest['token'])) {
+				$user = current($this->get_user_or_group('users', $cookieDigest['user']));
+				if ($user && $user['sessions'] && is_array($user['sessions'])) {
+					foreach($user['sessions'] as $k => $v) {
+						if ($k == $cookieDigest['token'] && $v >= time()) {
+							// If session matches and isnt expired in db then log user in
+							$this->user = $user;
+							$this->user_id = $user['id'];
+							$_SESSION[$this->persist_name]['user_id'] = $user['id'];
+							return true;
+						}
+					}
+					// No Session
+					return false;
+				} else {
+					// User doesnt exist OR user has no sessions
+					return false;
+				}
+			} else {
+				// Malformed Cookie
+				return false;
+			}
+			
+		}
+	}
+	
 	private function db_structure() {
 		// Field Template
 		// 'example' => array('type' => 'TEXT', 'length' => '50', 'unsigned' => false, 'notnull' => false, 'zerofill' => false, 'primary' => false, 'autoinc' => false, 'unique'=> false, 'default' => '', 'comment' => ''),
 		// type and length are required
 		return array(
-			'version' => '0.6',
+			'version' => '0.61',
 			'tables' => array(
 				'global' => array(
 					'name' => array('type' => 'VARCHAR', 'length' => 100, 'primary' => true,), 
@@ -407,6 +490,7 @@ class db_conn {
 					'groups_id' => array('type' => 'INT', 'length' => 100,),
 					'username' => array('type' => 'VARCHAR', 'length' => 100,),
 					'pass_hash' => array('type' => 'VARCHAR', 'length' => 320,),
+					'sessions' => array('type' => 'TEXT', 'length' => 100,),
 					'active' => array('type' => 'INT', 'length' => 11,),
 					'first' => array('type' => 'VARCHAR', 'length' => 50,),
 					'last' => array('type' => 'VARCHAR', 'length' => 50,),
