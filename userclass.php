@@ -561,12 +561,12 @@ class db_conn {
 		return $output;
 	}
 	
-	public function inject_db_cache($cache) {
+	public function inject_db_cache($cache, $overwrite = false) {
 		$success = true;
 		foreach($cache as $table => $tableData) {
 			if ($tableData) {
 				foreach($tableData as $key => $value) {
-					if (!$this->query_create($table, $value)) {
+					if (!($overwrite?$this->query_create_or_update($table, $value):$this->query_create($table, $value))) {
 						if ($table == 'global' && $value['name'] == 'db_version') { continue; } // Do not bother if issue was db_version
 						$success = false;
 						throw new Exception('Could not insert into '.$table.': '.json_encode($value));
