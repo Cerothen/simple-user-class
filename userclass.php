@@ -475,9 +475,15 @@ class db_conn {
 							return true;
 						}
 					}
+					// Remove Cookie
+					unset($_COOKIE[$this->persist_name]);
+					setcookie($this->persist_name, null, -1, '/', $_SERVER['HTTP_HOST']);
 					// No Session
 					return false;
 				} else {
+					// Remove Cookie
+					unset($_COOKIE[$this->persist_name]);
+					setcookie($this->persist_name, null, -1, '/', $_SERVER['HTTP_HOST']);
 					// User doesnt exist OR user has no sessions
 					return false;
 				}
@@ -485,7 +491,9 @@ class db_conn {
 				// Malformed Cookie
 				return false;
 			}
-			
+		} else {
+			// No existing login items
+			return false;
 		}
 	}
 	
