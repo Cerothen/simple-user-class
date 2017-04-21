@@ -76,6 +76,13 @@ $success = $test->createUser(array(
 	'pass_hash' => 'password_hash',
 ));
 ```
+  Update User
+```
+// Accepts either username or ID
+$test->updateUser('username',array(
+	'last' => 'last name',
+))
+```
   Get User List
 ```
 $users = $test->getUsers();
