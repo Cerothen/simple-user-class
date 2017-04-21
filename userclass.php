@@ -759,7 +759,7 @@ class db_conn {
 		return $output;
 	}
 	
-	public function create_db($recreate = false) {
+	private function create_db($recreate = false) {
 		// Create Database
 		switch ($this->db_type) {
 			case 'sqlite':
